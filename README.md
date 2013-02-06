@@ -1,10 +1,14 @@
 ### distributed-static [![travis](https://secure.travis-ci.org/haskell-distributed/distributed-static.png?branch=master,development)](http://travis-ci.org/haskell-distributed/distributed-static)
 
-
 This repository is part of Cloud Haskell.
 
 See http://haskell-distributed.github.com for documentation, user guides,
 tutorials and assistance.
+
+### About this branch
+
+This branch shows how we can add support for System.Eval.Haskell to make it
+possible to create Static values based on Haskell source code.
 
 ### Getting Help / Raising Issues
 

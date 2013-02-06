@@ -1,3 +1,4 @@
+{-# LANGUAGE StandaloneDeriving #-}
 -- | /Towards Haskell in the Cloud/ (Epstein et al, Haskell Symposium 2011)
 -- introduces the concept of /static/ values: values that are known at compile
 -- time. In a distributed setting where all nodes are running the same
@@ -201,6 +202,7 @@ module Control.Distributed.Static
     Static
   , staticLabel
   , staticApply
+  , staticEval
     -- * Derived static combinators
   , staticCompose
   , staticSplit
@@ -248,6 +250,9 @@ import Data.Rank1Typeable
   , isInstanceOf
   )
 
+import System.Eval.Haskell (Import, eval_)
+import Control.Monad.Trans.Error (ErrorT(..))
+
 --------------------------------------------------------------------------------
 -- Introducing static values                                                  --
 --------------------------------------------------------------------------------
@@ -255,6 +260,7 @@ import Data.Rank1Typeable
 data StaticLabel =
     StaticLabel String
   | StaticApply StaticLabel StaticLabel
+  | StaticEval String [Import] [String] [FilePath] [FilePath]
   deriving (Typeable, Show)
 
 -- | A static value. Static is opaque; see 'staticLabel' and 'staticApply'.
@@ -276,6 +282,13 @@ putStaticLabel (StaticLabel string) =
   putWord8 0 >> put string
 putStaticLabel (StaticApply label1 label2) =
   putWord8 1 >> putStaticLabel label1 >> putStaticLabel label2
+putStaticLabel (StaticEval code imports flags confs includePaths) = do
+  putWord8 2
+  put code
+  put imports
+  put flags
+  put confs
+  put includePaths
 
 getStaticLabel :: Get StaticLabel
 getStaticLabel = do
@@ -283,6 +296,7 @@ getStaticLabel = do
   case header of
     0 -> StaticLabel <$> get
     1 -> StaticApply <$> getStaticLabel <*> getStaticLabel
+    2 -> StaticEval <$> get <*> get <*> get <*> get <*> get
     _ -> fail "StaticLabel.get: invalid"
 
 -- | Create a primitive static value.
@@ -295,6 +309,25 @@ staticLabel = Static . StaticLabel
 -- | Apply two static values
 staticApply :: Static (a -> b) -> Static a -> Static b
 staticApply (Static f) (Static x) = Static (StaticApply f x)
+
+-- | Create a static value using the hs-plugins infrastructure
+--
+-- Example:
+--
+-- > unstatic initRemoteTable (staticEval "toDynamic (5 :: Int)" ["Data.Rank1Dynamic", "Control.Distributed.Static"] [] [] []) :: IO (Either String Int)
+--
+-- (gives @Right 5@). The import of Control.Distributed.Static here is
+-- necessary only because the `Data.Rank1Typeable.Typeable` instance for
+-- `Data.Rank1Dynamic.Dynamic` is an orphan instance declared there; this is a
+-- temporary kludge.
+--
+-- Note however that it is important that the code fragment includes the
+-- `toDynamic` bit; as is a common theme in Cloud Haskell related stuff, the
+-- client (whoever generates the code/process/closure..) is the person
+-- responsible for doing the type wrapping.
+staticEval :: String -> [Import] -> [String] -> [FilePath] -> [FilePath] -> Static a
+staticEval code imports flags confs includePaths =
+  Static (StaticEval code imports ("-fno-warn-deprecated-flags" : flags) confs includePaths)
 
 --------------------------------------------------------------------------------
 -- Eliminating static values                                                  --
@@ -319,22 +352,31 @@ registerStatic :: String -> Dynamic -> RemoteTable -> RemoteTable
 registerStatic label dyn (RemoteTable rtable)
   = RemoteTable (Map.insert label dyn rtable)
 
+-- TODO: This should be part of the rank1dynamic package
+deriving instance Typeable Dynamic
+
 -- Pseudo-type: RemoteTable -> Static a -> a
-resolveStaticLabel :: RemoteTable -> StaticLabel -> Either String Dynamic
+resolveStaticLabel :: RemoteTable -> StaticLabel -> IO (Either String Dynamic)
 resolveStaticLabel (RemoteTable rtable) (StaticLabel label) =
   case Map.lookup label rtable of
-    Nothing -> Left $ "Invalid static label '" ++ label ++ "'"
-    Just d  -> Right d
-resolveStaticLabel rtable (StaticApply label1 label2) = do
-  f <- resolveStaticLabel rtable label1
-  x <- resolveStaticLabel rtable label2
-  f `dynApply` x
+    Nothing -> return (Left $ "Invalid static label '" ++ label ++ "'")
+    Just d  -> return (Right d)
+resolveStaticLabel rtable (StaticApply label1 label2) = runErrorT $ do
+  f <- ErrorT $ resolveStaticLabel rtable label1
+  x <- ErrorT $ resolveStaticLabel rtable label2
+  ErrorT . return $ f `dynApply` x
+resolveStaticLabel _ e@(StaticEval code imports flags confs includePaths) = do
+  mval <- eval_ code imports flags confs includePaths
+  case mval of
+    Left err         -> return . Left  $ unlines err
+    Right Nothing    -> return . Left  $ "Type error when evaluating " ++ show e
+    Right (Just val) -> return . Right $ val
 
 -- | Resolve a static value
-unstatic :: Typeable a => RemoteTable -> Static a -> Either String a
-unstatic rtable (Static static) = do
-  dyn <- resolveStaticLabel rtable static
-  fromDynamic dyn
+unstatic :: Typeable a => RemoteTable -> Static a -> IO (Either String a)
+unstatic rtable (Static static) = runErrorT $ do
+  dyn <- ErrorT $ resolveStaticLabel rtable static
+  ErrorT . return $ fromDynamic dyn
 
 --------------------------------------------------------------------------------
 -- Closures                                                                   --
@@ -354,9 +396,9 @@ closure :: Static (ByteString -> a) -- ^ Decoder
 closure = Closure
 
 -- | Resolve a closure
-unclosure :: Typeable a => RemoteTable -> Closure a -> Either String a
-unclosure rtable (Closure static env) = do
-  f <- unstatic rtable static
+unclosure :: Typeable a => RemoteTable -> Closure a -> IO (Either String a)
+unclosure rtable (Closure static env) = runErrorT $ do
+  f <- ErrorT $ unstatic rtable static
   return (f env)
 
 -- | Convert a static value into a closure.
