@@ -237,6 +237,7 @@ import Data.Map (Map)
 import qualified Data.Map as Map (lookup, empty, insert)
 import Control.Applicative ((<$>), (<*>))
 import Control.Arrow as Arrow ((***), app)
+import Control.DeepSeq (NFData(rnf))
 import Data.Rank1Dynamic (Dynamic, toDynamic, fromDynamic, dynApply)
 import Data.Rank1Typeable
   ( Typeable
@@ -257,9 +258,16 @@ data StaticLabel =
   | StaticApply StaticLabel StaticLabel
   deriving (Eq, Ord, Typeable, Show)
 
+instance NFData StaticLabel where
+  rnf (StaticLabel s) = rnf s
+  rnf (StaticApply a b) = rnf a `seq` rnf b
+
 -- | A static value. Static is opaque; see 'staticLabel' and 'staticApply'.
 newtype Static a = Static StaticLabel
   deriving (Eq, Ord, Typeable, Show)
+
+instance NFData (Static a) where
+  rnf (Static s) = rnf s
 
 instance Typeable a => Binary (Static a) where
   put (Static label) = putStaticLabel label >> put (typeOf (undefined :: a))
@@ -347,6 +355,8 @@ data Closure a = Closure (Static (ByteString -> a)) ByteString
 instance Typeable a => Binary (Closure a) where
   put (Closure static env) = put static >> put env
   get = Closure <$> get <*> get
+
+instance NFData (Closure a) where rnf (Closure f b) = rnf f `seq` rnf b
 
 closure :: Static (ByteString -> a) -- ^ Decoder
         -> ByteString               -- ^ Encoded closure environment
