@@ -196,6 +196,7 @@
 -- >   where
 -- >     sdictSendPort :: forall a. SerializableDict a -> SerializableDict (SendPort a)
 -- >     sdictSendPort SerializableDict = SerializableDict
+{-# LANGUAGE CPP #-}
 module Control.Distributed.Static
   ( -- * Static values
     Static
@@ -233,6 +234,9 @@ import Data.Binary
   , decode
   )
 import Data.ByteString.Lazy (ByteString, empty)
+#if ! MIN_VERSION_bytestring(0,10,0)
+import Data.ByteString.Lazy as BSL
+#endif
 import Data.Map (Map)
 import qualified Data.Map as Map (lookup, empty, insert)
 import Control.Applicative ((<$>), (<*>))
@@ -356,7 +360,11 @@ instance Typeable a => Binary (Closure a) where
   put (Closure static env) = put static >> put env
   get = Closure <$> get <*> get
 
+#if MIN_VERSION_bytestring(0,10,0)
 instance NFData (Closure a) where rnf (Closure f b) = rnf f `seq` rnf b
+#else
+instance NFData (Closure a) where rnf (Closure f b) = rnf f `seq` BSL.length b `seq` ()
+#endif
 
 closure :: Static (ByteString -> a) -- ^ Decoder
         -> ByteString               -- ^ Encoded closure environment
